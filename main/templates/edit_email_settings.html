@@ -252,26 +252,6 @@
                     <h3 class="text-lg font-semibold mb-4">Edit Email Settings</h3>
                     <form method="post" action="{{ url_for('edit_email_settings') }}">
                         <div class="mb-4">
-                            <label for="MAILJET_API_KEY" class="block sec-text font-medium">Mailjet API Key:</label>
-                            <input 
-                                type="text" 
-                                id="MAILJET_API_KEY" 
-                                name="MAILJET_API_KEY" 
-                                placeholder="Leave blank to keep current"
-                                class="border border-gray-300 rounded px-4 py-2 w-full inputer"
-                            >
-                        </div>
-                        <div class="mb-4">
-                            <label for="MAILJET_API_SECRET" class="block sec-text font-medium">Mailjet API Secret:</label>
-                            <input 
-                                type="text" 
-                                id="MAILJET_API_SECRET" 
-                                name="MAILJET_API_SECRET" 
-                                placeholder="Leave blank to keep current"
-                                class="border border-gray-300 rounded px-4 py-2 w-full inputer"
-                            >
-                        </div>
-                        <div class="mb-4">
                             <label for="SYSTEM_EMAIL" class="block sec-text font-medium">System Email:</label>
                             <input 
                                 type="email" 

@@ -14,15 +14,6 @@
         <h1 class="text-2xl font-semibold mb-4">Environment Variable Setup</h1>
 
         <form action="{{ url_for('setupenv') }}" method="POST">
-            <div class="mb-4">
-                <label for="MAILJET_API_KEY" class="block text-gray-700 font-bold">Mailjet API Key:</label>
-                <input type="text" name="MAILJET_API_KEY" id="MAILJET_API_KEY" class="border rounded py-2 px-3 w-full" placeholder="Mailjet API Key">
-            </div>
-
-            <div class="mb-4">
-                <label for="MAILJET_API_SECRET" class="block text-gray-700 font-bold">Mailjet API Secret:</label>
-                <input type="text" name="MAILJET_API_SECRET" id="MAILJET_API_SECRET" class="border rounded py-2 px-3 w-full" placeholder="Mailjet API Secret">
-            </div>
 
             <div class="mb-4">
                 <label for="SYSTEM_EMAIL" class="block text-gray-700 font-bold">System Email:</label>
@@ -33,16 +24,6 @@
                 <label for="DELETE_DAYS" class="block text-gray-700 font-bold">Delete Days:</label>
                 <input type="number" name="DELETE_DAYS" id="DELETE_DAYS" class="border rounded py-2 px-3 w-full" placeholder="Default: 30" value="{{ DELETE_DAYS }}">
             </div>            
-
-            <div class="mb-4">
-                <label for="OIDC_CLIENT_ID" class="block text-gray-700 font-bold">OIDC Client ID:</label>
-                <input type="text" name="OIDC_CLIENT_ID" id="OIDC_CLIENT_ID" class="border rounded py-2 px-3 w-full" placeholder="OIDC Client ID">
-            </div>
-
-            <div class="mb-4">
-                <label for="OIDC_CLIENT_SECRET" class="block text-gray-700 font-bold">OIDC Client Secret:</label>
-                <input type="text" name="OIDC_CLIENT_SECRET" id="OIDC_CLIENT_SECRET" class="border rounded py-2 px-3 w-full" placeholder="OIDC Client Secret">
-            </div>
 
             <div class="mb-4">
                 <label for="OIDC_SERVER_METADATA_URL" class="block text-gray-700 font-bold">OIDC Server Metadata URL:</label>

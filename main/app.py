@@ -13,11 +13,8 @@ import re
 import shutil
 from PIL import Image
 from pathlib import Path
-from dotenv import load_dotenv, set_key
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-dotenv_path = os.path.join(os.path.dirname(__file__), './data/.env') # Load the .env file from the specified path
-load_dotenv(dotenv_path)
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 
 import python_avatars
@@ -25,10 +22,142 @@ import python_avatars
 # Disable SSL warnings to clean up your logs
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
+#
+# Config: settings.json (non-secrets) + environment variables (secrets)
+#
+# Priority for every read_env_variable() call:
+#   1. os.environ  — Docker/system env vars ALWAYS win/overrides all else (secrets AND settings)
+#   2. settings.json — UI-saved values (non-secrets only)
+#   3. hardcoded default
+#
+# Secrets (never written to disk):
+#   SECRET_KEY, MAILJET_API_KEY, MAILJET_API_SECRET, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET
+#
+# Everything else lives in ./data/settings.json and is editable via the UI.
+#
+# Migration: on first boot, if settings.json is missing, the legacy ./data/.env
+# is read automatically — secrets are promoted to os.environ, everything else
+# is written to settings.json. Transparent, no user action required.
+#
+
+_DATA_DIR = Path("./data")
+_SETTINGS_PATH = _DATA_DIR / "settings.json"
+_LEGACY_ENV_PATH = _DATA_DIR / ".env"
+
+_SECRET_KEYS = {
+    "SECRET_KEY", "MAILJET_API_KEY", "MAILJET_API_SECRET",
+    "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET",
+}
+
+_SETTINGS_DEFAULTS = {
+    "SYSTEM_EMAIL": "",
+    "DELETE_DAYS": "30",
+    "OIDC_SERVER_METADATA_URL": "",
+    "OIDC_LOGOUT_URL": "",
+    "PRIMARY_OIDC_FIELD": "email",
+    "SECONDARY_OIDC_FIELD": "preferred_username",
+    "PRIMARY_DB_FIELD": "email",
+    "SECONDARY_DB_FIELD": "username",
+    "ENABLE_AUTO_REGISTRATION": "false",
+    "LOGIN_PAGE_MESSAGE": "No account? Contact a family member to create an account!",
+    "ENABLE_DEFAULT_LOGIN": "true",
+    "REORDERING": "true",
+    "IMGENABLED": "false",
+    "ENABLE_LINK_SHARING": "true",
+    "ENABLE_SELF_REGISTRATION": "false",
+    "JOINING_CODE": "",
+    "CURRENCY_SYMBOL": "$",
+    "CURRENCY_POSITION": "before",
+    "HIDE_PURCHASER": "user_choice",
+}
+
+def _parse_dotenv_file(path: Path) -> dict:
+    result = {}
+    try:
+        with open(path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, _, value = line.partition('=')
+                key = key.strip()
+                value = value.strip()
+                if value and len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
+                    value = value[1:-1]
+                result[key] = value
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[config] Warning: could not parse {path}: {e}")
+    return result
+
+def _load_or_migrate_settings() -> dict:
+
+    _DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not _SETTINGS_PATH.exists():
+        print("[config] settings.json not found — running one-time migration from legacy .env")
+        legacy = _parse_dotenv_file(_LEGACY_ENV_PATH)
+
+        # Promote secrets from legacy .env into os.environ (in-process only)
+        for key in _SECRET_KEYS:
+            if key in legacy and not os.environ.get(key):
+                os.environ[key] = legacy[key]
+                print(f"[config] Migrated secret {key} → os.environ")
+
+        # Build settings.json from defaults + non-secret legacy values
+        settings = dict(_SETTINGS_DEFAULTS)
+        for key, value in legacy.items():
+            if key not in _SECRET_KEYS:
+                settings[key] = value
+
+        with open(_SETTINGS_PATH, 'w') as f:
+            json.dump(settings, f, indent=2)
+        print(f"[config] settings.json created at {_SETTINGS_PATH}")
+    else:
+        with open(_SETTINGS_PATH, 'r') as f:
+            settings = json.load(f)
+        # Backfill any keys added in newer app versions
+        changed = False
+        for key, default in _SETTINGS_DEFAULTS.items():
+            if key not in settings:
+                settings[key] = default
+                changed = True
+        if changed:
+            with open(_SETTINGS_PATH, 'w') as f:
+                json.dump(settings, f, indent=2)
+
+    return settings
+
+# Loaded once at startup — module-level dict mutated by save_setting()
+_settings: dict = _load_or_migrate_settings()
+
+
+def read_env_variable(key, default=None):
+
+    env_val = os.environ.get(key)
+    if env_val is not None:
+        return env_val
+    if key not in _SECRET_KEYS:
+        return _settings.get(key, default)
+    return default
+
+
+def save_setting(key: str, value: str):
+
+    if key in _SECRET_KEYS:
+        print(f"[config] Ignored attempt to save secret '{key}' to settings.json — set it as an env var.")
+        return
+    if os.environ.get(key) is not None:
+        print(f"[config] Note: '{key}' is overridden by an environment variable; UI-saved value will be ignored.")
+    _settings[key] = value
+    with open(_SETTINGS_PATH, 'w') as f:
+        json.dump(_settings, f, indent=2)
+
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv("SECRET_KEY")
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # Set SameSite attribute to Strict
-app.config['DATA'] = "./data"  # Directory where files are stored
+app.config['SECRET_KEY'] = os.environ.get("SECRET_KEY", "changethis-set-SECRET_KEY-env-var")
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['DATA'] = "./data"
 
 app.config['IDEAS_FILE'] = Path(app.config['DATA'], 'ideas.json')
 app.config['USERS_FILE'] = Path(app.config['DATA'], 'users.json')
@@ -36,36 +165,10 @@ app.config['AVATAR_DIR'] = Path(app.config['DATA'], 'avatars')
 
 app.config['AVATAR_CLAIM_TIMEOUT'] = 3600 # in seconds
 
-mailjet_api_key = os.getenv("MAILJET_API_KEY")
-mailjet_api_secret = os.getenv("MAILJET_API_SECRET")
+mailjet_api_key = os.environ.get("MAILJET_API_KEY", "")
+mailjet_api_secret = os.environ.get("MAILJET_API_SECRET", "")
 mailjet = Client(auth=(mailjet_api_key, mailjet_api_secret), version='v3.1')
 ph = PasswordHasher()
-
-
-def read_env_variable(key, default=None):
-    """Read environment variable from .env file with proper defaults"""
-    # Define the path here to avoid the default parameter issue
-    env_path = dotenv_path
-    
-    try:
-        with open(env_path, 'r') as file:
-            for line in file:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    current_key, value = line.split('=', 1)
-                    if current_key.strip() == key:
-                        value = value.strip()
-                        # Remove quotes
-                        if value and ((value[0] == '"' and value[-1] == '"') or (value[0] == "'" and value[-1] == "'")):
-                            value = value[1:-1]
-                        return value if value else default
-    except FileNotFoundError:
-        pass  # .env file doesn't exist, that's okay
-    except Exception as e:
-        print(f"Error reading .env file: {e}")
-    
-    # Fallback to system environment
-    return os.getenv(key, default)
 
 
 def prepopulate_file(filename: str, data: str):
@@ -93,28 +196,6 @@ prepopulate_file(app.config['IDEAS_FILE'], """
 prepopulate_file(app.config['USERS_FILE'], """
         [
         ]""")
-
-prepopulate_file('./data/.env', """
-MAILJET_API_KEY=''
-MAILJET_API_SECRET=''
-SECRET_KEY='changethis'
-SYSTEM_EMAIL=''
-DELETE_DAYS='30'
-OIDC_CLIENT_ID=''
-OIDC_CLIENT_SECRET=''
-OIDC_SERVER_METADATA_URL=''
-OIDC_LOGOUT_URL=''
-PRIMARY_OIDC_FIELD='email'
-SECONDARY_OIDC_FIELD='preferred_username'
-PRIMARY_DB_FIELD='email'
-SECONDARY_DB_FIELD='username'
-ENABLE_AUTO_REGISTRATION='false'
-LOGIN_PAGE_MESSAGE='No account? Contact a family member to create an account!'
-ENABLE_DEFAULT_LOGIN='true'
-REORDERING='true'
-IMGENABLED='false'
-                 
-""")
 
 # Setup directory for avatars
 try:
@@ -230,9 +311,12 @@ def favicon():
 @guest_allowed
 def show_avatar(filename=""):
     base = Path(app.config['AVATAR_DIR'])
+
+    filename = Path(filename).name  # ← trims folders safely
+
     avatar = base / filename
 
-    if os.path.isfile(avatar):
+    if avatar.is_file():
         return send_from_directory(base, filename)
 
     return send_from_directory(base, 'avatar1.png')
@@ -318,9 +402,9 @@ def utility_processor():
 oauth = OAuth(app)
 oauth.register(
     name="keycloak",
-    client_id=os.getenv("OIDC_CLIENT_ID"),
-    client_secret=os.getenv("OIDC_CLIENT_SECRET"),
-    server_metadata_url=os.getenv("OIDC_SERVER_METADATA_URL"),
+    client_id=read_env_variable("OIDC_CLIENT_ID"),
+    client_secret=read_env_variable("OIDC_CLIENT_SECRET"),
+    server_metadata_url=read_env_variable("OIDC_SERVER_METADATA_URL"),
     client_kwargs={"scope": "openid profile email phone"},
 )
 
@@ -372,10 +456,10 @@ def auth():
         return redirect(url_for("login"))
     
     # Retrieve fields dynamically from the environment
-    primary_oidc_field = os.getenv("PRIMARY_OIDC_FIELD", "").lower()
-    secondary_oidc_field = os.getenv("SECONDARY_OIDC_FIELD", "").lower()
-    primary_db_field = os.getenv("PRIMARY_DB_FIELD", "").lower()
-    secondary_db_field = os.getenv("SECONDARY_DB_FIELD", "").lower()
+    primary_oidc_field = read_env_variable("PRIMARY_OIDC_FIELD", "").lower()
+    secondary_oidc_field = read_env_variable("SECONDARY_OIDC_FIELD", "").lower()
+    primary_db_field = read_env_variable("PRIMARY_DB_FIELD", "").lower()
+    secondary_db_field = read_env_variable("SECONDARY_DB_FIELD", "").lower()
 
     # Get field values from OIDC user info
     primary_oidc_value = user_info.get(primary_oidc_field)
@@ -477,8 +561,6 @@ def setup_profile():
 
 @app.route('/')
 def index():
-    if os.getenv("SECRET_KEY") in [None, '']:
-        return redirect(url_for('need_restart'))
 
     # Redirect logged-in users to the dashboard
     if 'username' in session:
@@ -508,7 +590,7 @@ def login():
 
 
     # For GET requests, render the login page
-    oidc_client_id = os.getenv("OIDC_CLIENT_ID")  # Get OIDC Client ID
+    oidc_client_id = read_env_variable("OIDC_CLIENT_ID")  # Get OIDC Client ID
     oidc_enabled = bool(oidc_client_id)  # Check if OIDC is enabled
     login_message = read_env_variable("LOGIN_PAGE_MESSAGE") or "No account? Contact a family member to create an account."
     # If default login is disabled, render an OIDC-only login page
@@ -723,13 +805,6 @@ def add2():
     # Render the "Add Idea" page with the filtered user list
     return render_template('add2.html', user_list=user_list, imgenabled=imgenabled)
 
-@app.route('/need_restart', methods=['GET'])
-def need_restart():
-    if os.getenv("SECRET_KEY") in [None, '']:
-        return render_template('restartneeded.html')
-    else:
-        return redirect(url_for('setup'))    
-
 
 @app.route('/add_idea/<path:selected_user_id>', methods=['GET', 'POST'])
 @login_required
@@ -887,7 +962,7 @@ def send_email_to_buyer_via_mailjet(buyer_username, idea_name, message_subject):
                     'Messages': [
                         {
                             'From': {
-                                'Email': os.getenv("SYSTEM_EMAIL"),  # Your sender email address
+                                'Email': read_env_variable("SYSTEM_EMAIL"),  # Your sender email address
                                 'Name': 'GiftManager',
                             },
                             'To': [
@@ -1071,7 +1146,7 @@ def dashboard():
         'avatar': current_user.get('avatar', None)
     }
 
-    app_version = "v2.7.0"
+    app_version = "v2.8.0"
     
     # Get assigned users if available in the current user's data
     assigned_users = current_user.get('assigned_users', None)
@@ -2076,85 +2151,50 @@ def manage_users():
 @admin_required
 def edit_email_settings():
     if request.method == 'POST':
-        # Retrieve form values
-        mailjet_api_key = request.form.get('MAILJET_API_KEY', None)
-        mailjet_api_secret = request.form.get('MAILJET_API_SECRET', None)
         system_email = request.form.get('SYSTEM_EMAIL', None)
 
         try:
-            # Read current .env content
-            with open(dotenv_path, 'r') as file:
-                env_content = file.readlines()
-
-            # Update the variables in the .env file
-            new_env_content = []
-            for line in env_content:
-                key, _, value = line.partition('=')
-                key = key.strip()
-                if key == 'MAILJET_API_KEY' and mailjet_api_key:
-                    new_env_content.append(f"MAILJET_API_KEY='{mailjet_api_key}'\n")
-                elif key == 'MAILJET_API_SECRET' and mailjet_api_secret:
-                    new_env_content.append(f"MAILJET_API_SECRET='{mailjet_api_secret}'\n")
-                elif key == 'SYSTEM_EMAIL' and system_email:
-                    new_env_content.append(f"SYSTEM_EMAIL='{system_email}'\n")
-                else:
-                    new_env_content.append(line)
-
-            # Write updated content back to .env
-            with open(dotenv_path, 'w') as file:
-                file.writelines(new_env_content)
-
-            # Reload the .env file to reflect changes
-            load_dotenv(dotenv_path, override=True)
-
+            # Secrets go into os.environ in-process (takes effect immediately).
+            # Set them permanently in your Docker/systemd environment.
+            if mailjet_api_key:
+                os.environ["MAILJET_API_KEY"] = mailjet_api_key
+            if mailjet_api_secret:
+                os.environ["MAILJET_API_SECRET"] = mailjet_api_secret
+            # SYSTEM_EMAIL is a non-secret — saved to settings.json
+            if system_email:
+                save_setting("SYSTEM_EMAIL", system_email)
             flash("Email settings updated successfully!", "success")
         except Exception as e:
             flash(f"An error occurred: {e}", "danger")
         return redirect(url_for('edit_email_settings'))
 
-    # Reload the .env file before fetching current settings
-    load_dotenv(dotenv_path, override=True)  # Ensure we override old values
     current_settings = {
-        'MAILJET_API_KEY': '******',  # Mask sensitive values
-        'MAILJET_API_SECRET': '******',  # Mask sensitive values
-        'SYSTEM_EMAIL': os.getenv('SYSTEM_EMAIL', ''),
+        'SYSTEM_EMAIL': read_env_variable("SYSTEM_EMAIL", ""),
     }
     return render_template('edit_email_settings.html', settings=current_settings)
 
 @app.route('/edit_login_message', methods=['GET', 'POST'])
-@admin_required  # Assumes an @admin_required decorator exists for access control
+@admin_required
 def edit_login_message():
     if request.method == 'POST':
         new_message = request.form.get('login_message', '').strip()
         if new_message:
             try:
-                # Update the .env file
-                with open(dotenv_path, 'r') as file:
-                    lines = file.readlines()
-
-                with open(dotenv_path, 'w') as file:
-                    for line in lines:
-                        if line.strip().startswith("LOGIN_PAGE_MESSAGE="):
-                            file.write(f"LOGIN_PAGE_MESSAGE='{new_message}'\n")
-                        else:
-                            file.write(line)
-
+                save_setting("LOGIN_PAGE_MESSAGE", new_message)
                 flash("Login message updated successfully!", "success")
             except Exception as e:
                 flash(f"Error updating login message: {e}", "danger")
         else:
             flash("Message cannot be empty.", "danger")
-
         return redirect(url_for('edit_login_message'))
 
-    # Fetch the current login message directly from .env
     current_message = read_env_variable("LOGIN_PAGE_MESSAGE") or "No account? Contact a family member to create an account."
     return render_template('edit_login_message.html', current_message=current_message)
 
 def delete_old_gift_ideas():
 
     # Read the number of days from the environment variable
-    threshold_days = int(read_env_variable("DELETE_DAYS", dotenv_path) or 30)
+    threshold_days = int(read_env_variable("DELETE_DAYS", "30") or 30)
 
     # Calculate the threshold time
     threshold_time = datetime.now() - timedelta(days=threshold_days)
@@ -2198,7 +2238,7 @@ def delete_old_gift_ideas():
 @app.route('/delete_old_gift_ideas', methods=['GET', 'POST'])
 @admin_required
 def delete_old_gift_ideas_page():
-    current_days = read_env_variable("DELETE_DAYS", dotenv_path) or 30
+    current_days = read_env_variable("DELETE_DAYS", "30") or 30
     if request.method == 'POST':
         try:
             # Delete old gift ideas and get the count of deleted rows
@@ -2230,7 +2270,7 @@ def change_delete_days():
                 new_days = int(new_days)
 
                 # Update the .env file with the new value
-                set_key(dotenv_path, "DELETE_DAYS", str(new_days))  # Update the DELETE_DAYS value
+                save_setting("DELETE_DAYS", str(new_days))  # Update the DELETE_DAYS value
 
                 flash(f"The number of days to delete old gift ideas has been updated to {new_days}.", "success")
                 return redirect(url_for('change_delete_days'))
@@ -2241,7 +2281,7 @@ def change_delete_days():
             flash("Please provide a value for the number of days.", "danger")
 
     # Get the current value of the DELETE_OLD_GIFTS_DAYS from the .env file
-    current_days = read_env_variable("DELETE_DAYS", dotenv_path) or 30
+    current_days = read_env_variable("DELETE_DAYS", "30") or 30
     return render_template('delete_old_gift_ideas.html', current_days=current_days)
 
 @app.route('/setupadmin', methods=['GET', 'POST'])
@@ -2299,12 +2339,8 @@ def setupenv():
         # Collect form data
         delete_days = request.form.get('DELETE_DAYS', '30')  # Default to 30 days
         env_variables = {
-            "MAILJET_API_KEY": request.form.get('MAILJET_API_KEY', ''),
-            "MAILJET_API_SECRET": request.form.get('MAILJET_API_SECRET', ''),
             "SYSTEM_EMAIL": request.form.get('SYSTEM_EMAIL', ''),
             "DELETE_DAYS": delete_days,
-            "OIDC_CLIENT_ID": request.form.get('OIDC_CLIENT_ID', ''),
-            "OIDC_CLIENT_SECRET": request.form.get('OIDC_CLIENT_SECRET', ''),
             "OIDC_SERVER_METADATA_URL": request.form.get('OIDC_SERVER_METADATA_URL', ''),
             "OIDC_LOGOUT_URL": request.form.get('OIDC_LOGOUT_URL', ''),
             "PRIMARY_OIDC_FIELD": request.form.get('PRIMARY_OIDC_FIELD', 'email'),
@@ -2314,11 +2350,15 @@ def setupenv():
             "ENABLE_AUTO_REGISTRATION": request.form.get('ENABLE_AUTO_REGISTRATION', 'false'),
         }
 
-        # Save each variable to .env file
+        # Secrets → os.environ (in-process); non-secrets → settings.json
         for key, value in env_variables.items():
-            set_key(dotenv_path, key, value)
+            if key in _SECRET_KEYS:
+                if value:
+                    os.environ[key] = value
+            else:
+                save_setting(key, value)
 
-        flash('Environment variables saved successfully!', 'success')
+        flash('Settings saved successfully!', 'success')
         return redirect(url_for('index'))
 
     # Render the setup environment page
@@ -2330,8 +2370,6 @@ def setup_oidc():
     if request.method == 'POST':
         # Collect form data and validate required fields
         oidc_env_variables = {
-            "OIDC_CLIENT_ID": request.form.get("OIDC_CLIENT_ID", '').strip(),
-            "OIDC_CLIENT_SECRET": request.form.get("OIDC_CLIENT_SECRET", '').strip(),
             "OIDC_SERVER_METADATA_URL": request.form.get("OIDC_SERVER_METADATA_URL", '').strip(),
             "OIDC_LOGOUT_URL": request.form.get("OIDC_LOGOUT_URL", '').strip(),
             "PRIMARY_OIDC_FIELD": request.form.get("PRIMARY_OIDC_FIELD", 'email').strip(),
@@ -2342,41 +2380,38 @@ def setup_oidc():
             "ENABLE_DEFAULT_LOGIN": request.form.get("ENABLE_DEFAULT_LOGIN", 'true').strip(),
         }
 
-        # Check for missing fields
-        missing_fields = [key for key, value in oidc_env_variables.items() if not value]
+        # Check for missing fields — secrets OK if already in environment
+        missing_fields = [
+            key for key, value in oidc_env_variables.items()
+            if not value and not (key in _SECRET_KEYS and os.environ.get(key))
+        ]
         if missing_fields:
             flash(f"Missing required fields: {', '.join(missing_fields)}", 'danger')
             return render_template('setup_oidc.html', current_values=oidc_env_variables)
 
         try:
-            # Save each variable to the .env file
             for key, value in oidc_env_variables.items():
-                set_key(dotenv_path, key, value)
+                if key in _SECRET_KEYS:
+                    if value:
+                        os.environ[key] = value  # in-process only — set permanently in your env
+                else:
+                    save_setting(key, value)
 
             flash('OIDC settings saved successfully!', 'success')
-            return redirect(url_for('setup_oidc'))  # Redirect to home page after saving
+            return redirect(url_for('setup_oidc'))
         except Exception as e:
             flash(f"Error saving OIDC settings: {e}", "danger")
             return render_template('setup_oidc.html', current_values=oidc_env_variables)
 
-    # For GET requests, load the current values of OIDC-related environment variables
-    try:
-        # Load the .env file directly using the path
-        load_dotenv(dotenv_path, override=True)
-    except FileNotFoundError:
-        flash("Environment file not found. Creating a new one.", "warning")
-    
     current_values = {
-        "OIDC_CLIENT_ID": os.getenv("OIDC_CLIENT_ID", ''),
-        "OIDC_CLIENT_SECRET": os.getenv("OIDC_CLIENT_SECRET", ''),
-        "OIDC_SERVER_METADATA_URL": os.getenv("OIDC_SERVER_METADATA_URL", ''),
-        "OIDC_LOGOUT_URL": os.getenv("OIDC_LOGOUT_URL", ''),
-        "PRIMARY_OIDC_FIELD": os.getenv("PRIMARY_OIDC_FIELD", 'email'),
-        "SECONDARY_OIDC_FIELD": os.getenv("SECONDARY_OIDC_FIELD", 'preferred_username'),
-        "PRIMARY_DB_FIELD": os.getenv("PRIMARY_DB_FIELD", 'email'),
-        "SECONDARY_DB_FIELD": os.getenv("SECONDARY_DB_FIELD", 'username'),
-        "ENABLE_AUTO_REGISTRATION": os.getenv("ENABLE_AUTO_REGISTRATION", 'false'),
-        "ENABLE_DEFAULT_LOGIN": os.getenv("ENABLE_DEFAULT_LOGIN", 'true'),
+        "OIDC_SERVER_METADATA_URL": read_env_variable("OIDC_SERVER_METADATA_URL", ""),
+        "OIDC_LOGOUT_URL": read_env_variable("OIDC_LOGOUT_URL", ""),
+        "PRIMARY_OIDC_FIELD": read_env_variable("PRIMARY_OIDC_FIELD", "email"),
+        "SECONDARY_OIDC_FIELD": read_env_variable("SECONDARY_OIDC_FIELD", "preferred_username"),
+        "PRIMARY_DB_FIELD": read_env_variable("PRIMARY_DB_FIELD", "email"),
+        "SECONDARY_DB_FIELD": read_env_variable("SECONDARY_DB_FIELD", "username"),
+        "ENABLE_AUTO_REGISTRATION": read_env_variable("ENABLE_AUTO_REGISTRATION", "false"),
+        "ENABLE_DEFAULT_LOGIN": read_env_variable("ENABLE_DEFAULT_LOGIN", "true"),
     }
 
     return render_template('setup_oidc.html', current_values=current_values)
@@ -2474,7 +2509,7 @@ def update_hide_purchaser():
     if hide_purchaser_value not in allowed_values:
         hide_purchaser_value = 'user_choice'  # Default fallback
     
-    set_key(dotenv_path, "HIDE_PURCHASER", hide_purchaser_value)
+    save_setting("HIDE_PURCHASER", hide_purchaser_value)
     return redirect(url_for('setup_advanced'))
 
 
@@ -2483,7 +2518,7 @@ def update_hide_purchaser():
 @admin_required
 def update_reordering():
     reordering = request.form.get('reordering', 'true').strip()
-    set_key(dotenv_path, "REORDERING", reordering)
+    save_setting("REORDERING", reordering)
     return redirect(url_for('setup_advanced'))
 
 # Route to update IMGENABLED (POST request)
@@ -2491,7 +2526,7 @@ def update_reordering():
 @admin_required
 def update_images():
     images = request.form.get('images', 'true').strip()
-    set_key(dotenv_path, "IMGENABLED", images)
+    save_setting("IMGENABLED", images)
     return redirect(url_for('setup_advanced'))
 
 @app.route('/rundl')
@@ -2688,8 +2723,8 @@ def update_currency_settings():
     symbol = request.form.get('currency_symbol', '$')
     position = request.form.get('currency_position', 'before')
     
-    set_key(dotenv_path, "CURRENCY_SYMBOL", symbol)
-    set_key(dotenv_path, "CURRENCY_POSITION", position)
+    save_setting("CURRENCY_SYMBOL", symbol)
+    save_setting("CURRENCY_POSITION", position)
     
     flash('Currency settings updated! Please restart to see changes', 'success')
     return redirect(url_for('setup_advanced'))
@@ -2701,8 +2736,8 @@ def update_self_registration_settings():
     enable_self_registration = request.form.get('enable_self_registration', 'false')
     joining_code = request.form.get('joining_code', '')
     
-    set_key(dotenv_path, "ENABLE_SELF_REGISTRATION", enable_self_registration)
-    set_key(dotenv_path, "JOINING_CODE", joining_code)
+    save_setting("ENABLE_SELF_REGISTRATION", enable_self_registration)
+    save_setting("JOINING_CODE", joining_code)
     
     flash('Self-registration settings updated successfully!', 'success')
     return redirect(url_for('setup_advanced'))
@@ -2839,7 +2874,7 @@ def update_link_sharing():
     """Update global link sharing setting"""
     enable_link_sharing = request.form.get('enable_link_sharing', 'false').lower() == 'true'
     
-    set_key(dotenv_path, "ENABLE_LINK_SHARING", str(enable_link_sharing).lower())
+    save_setting("ENABLE_LINK_SHARING", str(enable_link_sharing).lower())
     
     flash('Link sharing settings updated!', 'success')
     return redirect(url_for('setup_advanced'))
